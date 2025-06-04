@@ -12,7 +12,9 @@ code/SFL_mnist_0.1/
 code/SFL_mnist_0.5/
 
 
-code/ssfl/
+code/ssfl/resource_profiler_agent.py
+code/ssfl/trainer_no_agent.py
+
 
 
 code/main_no_agent.py
