@@ -16,6 +16,7 @@ code/ssfl/
 
 
 code/main_no_agent.py
+code/main_agent.py
 code/search_space.yaml
 
 .env
