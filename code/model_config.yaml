@@ -16,7 +16,7 @@
 dataset_name: "mnist"  # or "mnist"
 model_name: "ResNet18"
 num_clients: 10
-global_epochs: 3
+global_epochs: 5
 local_epochs: 2
 batch_size: 128
 frac: 0.5
@@ -25,3 +25,7 @@ train_sample_fraction: 1.0
 test_sample_fraction: 1.0
 min_samples_per_client: 5
 num_clusters: 3
+
+
+#initialization
+learning_rate: 0.001 # Initial learning rate for all clients

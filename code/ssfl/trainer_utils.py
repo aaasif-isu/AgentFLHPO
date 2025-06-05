@@ -1,4 +1,4 @@
-# trainer_utils.py
+# code/ssfl/trainer_utils.py
 import torch
 from torch.nn.utils import clip_grad_norm_
 from ssfl.aggregation import FedAvg, combine_client_server_models
@@ -7,6 +7,7 @@ from ssfl.resource_profiler import profile_resources
 from ssfl.utils import calculate_accuracy, save_model
 import numpy as np
 import random
+from torch.utils.data import ConcatDataset, DataLoader
 
 
 def prepare_training(model_name, global_model, num_clients, num_clusters=3):
@@ -23,9 +24,9 @@ def select_participating_clients(num_clients, frac):
 
 
 def train_single_client(model_name, num_classes, arc_cfg, global_model,
-                        device, in_channels, train_loader, loss_fn,
-                        lr, local_epochs):
-    client_net, server_net, _, _ = create_split_model(
+                        device, in_channels, train_loader, val_loader, loss_fn,
+                        lr, local_epochs, cid):
+    client_net, server_net, full_ref, _ = create_split_model(
         model_name, num_classes, arc_cfg,
         base_model=global_model, device=device, in_channels=in_channels
     )
@@ -35,7 +36,7 @@ def train_single_client(model_name, num_classes, arc_cfg, global_model,
     sch_s = torch.optim.lr_scheduler.CosineAnnealingLR(opt_s, T_max=local_epochs)
 
     client_net.train(); server_net.train()
-    for _ in range(local_epochs):
+    for epoch in range(local_epochs):
         for imgs, lbls in train_loader:
             imgs, lbls = imgs.to(device), lbls.to(device)
             opt_c.zero_grad(); opt_s.zero_grad()
@@ -52,6 +53,13 @@ def train_single_client(model_name, num_classes, arc_cfg, global_model,
             clip_grad_norm_(server_net.parameters(), 1.0)
             opt_c.step(); opt_s.step()
         sch_c.step(); sch_s.step()
+
+        # Evaluate the client model at each local epoch
+        temp_model = combine_client_server_models(client_net, server_net, full_ref.to(device), device, num_classes, arc_cfg)
+        train_acc, train_loss = evaluate_model(temp_model, train_loader, device, loss_fn)
+        test_acc, test_loss = evaluate_model(temp_model, val_loader, device, loss_fn)
+        print(f"  Client {cid}, Epoch {epoch+1}: Train Acc {train_acc:.2f}%, Test Acc {test_acc:.2f}%")
+
 
     return client_net.state_dict(), server_net.state_dict(), len(train_loader.dataset)
 

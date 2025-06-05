@@ -13,6 +13,8 @@ import pandas as pd
 from PIL import Image
 from torch.utils.data import Dataset, random_split
 
+from torch.utils.data import Subset, random_split 
+
 
 
 random.seed(42)
@@ -229,6 +231,85 @@ class EarlyStopping:
             self.best_score = current_score
             self.counter = 0
 
+def split_client_data(client_subset, val_split_ratio=0.2):
+    """
+    Splits a client's dataset (a PyTorch Subset) into training and validation.
+    """
+    num_total = len(client_subset)
+    if num_total == 0: # Handle empty client subset
+        return client_subset, Subset(client_subset.dataset, [])
+
+    num_val = int(num_total * val_split_ratio)
+    if num_val == 0 and num_total > 1 and val_split_ratio > 0: num_val = 1 # Ensure at least 1 val sample
+    
+    num_train = num_total - num_val
+    if num_train <= 0: # If not enough data for a split
+        return client_subset, Subset(client_subset.dataset, [])
+
+    train_local_indices, val_local_indices = random_split(range(num_total), [num_train, num_val])
+    
+    original_dataset_train_indices = [client_subset.indices[i] for i in train_local_indices.indices]
+    original_dataset_val_indices = [client_subset.indices[i] for i in val_local_indices.indices]
+
+    return Subset(client_subset.dataset, original_dataset_train_indices), \
+           Subset(client_subset.dataset, original_dataset_val_indices)
+
+def prepare_client_dataloaders_for_hpo(
+    client_data_subsets, # Output of partition_data_non_iid_random
+    batch_size,
+    val_split_ratio=0.2,
+    num_workers=0, # Make num_workers configurable
+    pin_memory=False # Make pin_memory configurable
+):
+    """
+    Prepares client-specific training and validation DataLoaders for HPO.
+
+    Args:
+        client_data_subsets (list): List of PyTorch Subsets, one for each client.
+        batch_size (int): The batch size for the DataLoaders.
+        val_split_ratio (float): Fraction of a client's data for local validation.
+        num_workers (int): Number of worker processes for DataLoader.
+        pin_memory (bool): If True, DataLoader will copy Tensors into CUDA pinned memory.
+
+    Returns:
+        tuple: (client_train_loaders, client_val_loaders)
+               client_train_loaders: List of DataLoaders for client training.
+               client_val_loaders: Dict (client_id -> DataLoader) for client validation.
+    """
+    client_train_loaders = []
+    client_val_loaders = {} 
+
+    for i, per_client_subset in enumerate(client_data_subsets):
+        if len(per_client_subset) == 0: # Handle clients with no data
+            empty_ds = torch.utils.data.TensorDataset(torch.empty(0), torch.empty(0))
+            client_train_loaders.append(DataLoader(empty_ds, batch_size=batch_size))
+            client_val_loaders[i] = DataLoader(empty_ds, batch_size=batch_size)
+            continue
+        
+        client_local_train_data, client_local_val_data = split_client_data(
+            per_client_subset, 
+            val_split_ratio=val_split_ratio
+        )
+
+        train_loader = DataLoader(
+            client_local_train_data, batch_size=batch_size, shuffle=True,
+            num_workers=num_workers, pin_memory=pin_memory
+        )
+        client_train_loaders.append(train_loader)
+
+        # Ensure validation loader is created even if client_local_val_data is empty after split
+        if len(client_local_val_data) > 0:
+            val_loader = DataLoader(
+                client_local_val_data, batch_size=batch_size, shuffle=False,
+                num_workers=num_workers, pin_memory=pin_memory
+            )
+        else: # Create an empty DataLoader if validation set is empty
+            empty_ds_val = torch.utils.data.TensorDataset(torch.empty(0), torch.empty(0))
+            val_loader = DataLoader(empty_ds_val, batch_size=batch_size)
+            
+        client_val_loaders[i] = val_loader
+            
+    return client_train_loaders, client_val_loaders
             
 class Tee(object):
     def __init__(self, filename, mode='w'):
@@ -242,3 +323,5 @@ class Tee(object):
         self.log_file.flush()
     def close(self):
         self.log_file.close()
+
+    
