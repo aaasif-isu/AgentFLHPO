@@ -6,12 +6,16 @@ __pycache__/
 *.pyd
 
 code/agents_v1/
-code/agent/
+
+code/agent/client_hpo_states.yaml
+code/agent/hp_config.yaml
+
 code/archive/
 code/best_model/
 code/data/
 code/latest_model/
 code/models/
+
 code/sfl_agent_framework/
 code/SFL_cifar10_0.5/
 code/SFL_mnist_0.0/
@@ -32,6 +36,7 @@ code/ssfl/output
 code/main_no_agent.py
 code/main_agent.py
 code/search_space.yaml
+
 
 .env
 
