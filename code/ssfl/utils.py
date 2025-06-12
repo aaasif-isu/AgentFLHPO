@@ -204,7 +204,7 @@ def partition_data_non_iid_random(subset, num_clients, imbalance_factor, min_sam
     return [Subset(subset.dataset, indices) for indices in client_data_indices.values()]
 
 def create_dataloaders(subsets, batch_size, shuffle):
-    return [DataLoader(subset, batch_size=batch_size, shuffle=shuffle) for subset in subsets]
+    return [DataLoader(subset, batch_size=batch_size, shuffle=shuffle, drop_last=True) for subset in subsets]
 
 
 class EarlyStopping:
