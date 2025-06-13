@@ -13,10 +13,10 @@ YOUR_APP_NAME = "FedHPO"
 
 def call_llm(prompt: str) -> str:
     # --- ADD THIS BLOCK TO PRINT THE PROMPT FOR DEBUGGING ---
-    print("\n" + "="*60)
-    print(">>> PROMPT BEING SENT TO LLM API:")
-    print(prompt)
-    print("="*60 + "\n")
+    # print("\n" + "="*60)
+    # print(">>> PROMPT BEING SENT TO LLM API:")
+    # print(prompt)
+    # print("="*60 + "\n")
     # --- END DEBUGGING BLOCK ---
 
     headers = {

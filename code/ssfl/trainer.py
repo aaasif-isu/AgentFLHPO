@@ -10,7 +10,7 @@ from ssfl.model_splitter import create_global_model
 from ssfl.utils import ensure_dir, save_model
 from ssfl.trainer_utils import (
     prepare_training, select_participating_clients, build_cluster_model, 
-    evaluate_model, _format_report
+    evaluate_model, _format_report, train_single_client
 )
 from ssfl.trainer_utils import cluster_fedavg, global_fedavg
 
@@ -19,14 +19,15 @@ from ssfl.trainer_utils import cluster_fedavg, global_fedavg
 from ssfl.strategies import AgentStrategy, FixedStrategy, RandomSearchStrategy, BO_Strategy , SHA_Strategy
 
 def train_model(model_name, num_classes, in_channels,
-                train_loaders, val_loader,
-                device, global_epochs, local_epochs,
+                train_subsets, val_loader,
+                device, global_epochs,
                 num_clients, imbalance_ratio, dataset_name, frac,
-                train_subsets, config): # Pass the whole config dictionary
+                config): # Pass the whole config dictionary
 
     loss_fn = torch.nn.CrossEntropyLoss().to(device)
     global_model = create_global_model(model_name, num_classes, in_channels, device)
 
+    # --- Load HPO Search Space ---
     hp_config_path = os.path.join(os.path.dirname(__file__), "..", "agent", "hp_config.yaml")
     with open(hp_config_path, 'r') as f:
         initial_search_space = yaml.safe_load(f)
@@ -39,6 +40,15 @@ def train_model(model_name, num_classes, in_channels,
     #client_states = [{"search_space": initial_search_space.copy(), "hpo_report": {}} for i in range(num_clients)]
     # --- MODIFICATION 7: Add "last_analysis" key to the state dictionary ---
     client_states = [{"search_space": initial_search_space.copy(), "hpo_report": {}, "last_analysis": None} for i in range(num_clients)]
+
+    # client_states = [{
+    #     "search_space": initial_search_space.copy(),
+    #     "hpo_report": {},
+    #     "last_analysis": None,
+    #     # --- ADD THESE NEW KEYS ---
+    #     "best_accuracy": 0.0,
+    #     "hpo_no_improvement_count": 0
+    #         } for i in range(num_clients)]
 
     
     hpo_strategy = None
@@ -55,23 +65,26 @@ def train_model(model_name, num_classes, in_channels,
     elif strategy_name == 'random_search':
         hpo_strategy = RandomSearchStrategy(**strategy_args)
     elif strategy_name == 'sha':
-        # You can pass SHA-specific configs from your YAML file here if needed
-        hpo_strategy = SHA_Strategy(**strategy_args, population_size=27, elimination_rate=3)
+        sha_config = hpo_config.get('sha_config', {})
+        hpo_strategy = SHA_Strategy(**strategy_args, **sha_config)
     elif strategy_name == 'bo':
         hpo_strategy = BO_Strategy(**strategy_args)
-    else: # Default to the fixed baseline strategy
+    else:
         strategy_args['fixed_hps'] = hpo_config.get('fixed_hps')
         hpo_strategy = FixedStrategy(**strategy_args)  
-
     print(f"--- Using HPO Strategy: {strategy_name.upper()} ---")
+
+    # --- Load Training Control Params (No Hardcoding) ---
+    training_params = config.get('training_params', {})
+    patience = training_params.get('patience', 10)
+    min_delta = training_params.get('min_delta', 0.01)
 
     # --- Setup code from original trainer (Unchanged) ---
     best_global_accuracy, no_improvement_count = 0.0, 0
-    patience, min_delta = 10, 0.01
     best_model_path = f"best_model/best_{dataset_name}_c{num_clients}_imb{imbalance_ratio}.pth"
-    latest_model_path = f"latest_model/latest_{dataset_name}_c{num_clients}_imb{imbalance_ratio}.pth"
-    ensure_dir("best_model"); ensure_dir("latest_model")
-    arc_configs, clients_per_cluster = prepare_training(model_name, global_model, num_clients)
+    ensure_dir("best_model")
+
+    arc_configs, clients_per_cluster, total_layers  = prepare_training(model_name, global_model, num_clients)
 
     # --- Main Training Loop ---
     for g_epoch in range(global_epochs):
@@ -98,11 +111,12 @@ def train_model(model_name, num_classes, in_channels,
                     "model_name": model_name,
                     "dataset_name": dataset_name,
                     "peer_history": cluster_peer_history, # Pass the history of previous peers
+                    "arc_cfg": arc_cfg, "total_layers": total_layers,
+                    "train_subsets": train_subsets,
                     "training_args": {
                         "model_name": model_name, "num_classes": num_classes, "arc_cfg": arc_cfg,
                         "global_model": global_model, "device": device, "in_channels": in_channels,
-                        "train_loader": train_loaders[cid], "val_loader": val_loader, "loss_fn": loss_fn,
-                        "local_epochs": local_epochs,
+                        "val_loader": val_loader, "loss_fn": loss_fn,
                         "global_epoch": g_epoch
 
                     }
@@ -110,7 +124,17 @@ def train_model(model_name, num_classes, in_channels,
 
                 # The strategy object handles all HPO and training logic
                 hps, w_c, w_s, sz, final_state = hpo_strategy.get_hyperparameters(context)
-            
+
+                # Create the client's DataLoader on-the-fly using the suggested batch_size
+                client_hps = hps.get('client', {})
+                batch_size = client_hps.get('batch_size', 32)
+                dynamic_train_loader = DataLoader(train_subsets[cid], batch_size=batch_size, shuffle=True)
+                
+                # 4. Add the new loader to the training arguments
+                context['training_args']['train_loader'] = dynamic_train_loader
+                
+                # 5. Call the training function, which uses `local_epochs` from inside `hps`.
+                w_c, w_s, sz, results = train_single_client(**context['training_args'], hps=hps, cid=cid)
                 
                 # Append results for aggregation
                 local_client_w.append(w_c)
@@ -124,6 +148,10 @@ def train_model(model_name, num_classes, in_channels,
                     # --- NEW: Create a summary of the completed run for the next peer ---
                     if final_state.get('last_analysis'):
                         key_insight = final_state.get('last_analysis', {}).get('decision_summary', 'Analysis failed.')
+                        hps_summary = final_state.get('hps', {})
+                        results_summary = final_state.get('results', {})
+                        test_acc_summary = results_summary.get('test_acc', [0.0])[-1]
+                        
                         peer_summary = {
                             "client_id": cid,
                             "hps_used": final_state.get('hps', {}),
@@ -140,7 +168,7 @@ def train_model(model_name, num_classes, in_channels,
             cluster_model = build_cluster_model(model_name, num_classes, arc_cfg, global_model, device, in_channels, w_c, w_s)
             
             cluster_train_subset = ConcatDataset([train_subsets[i] for i in members])
-            cluster_train_loader = DataLoader(cluster_train_subset, batch_size=128, shuffle=True)
+            cluster_train_loader = DataLoader(cluster_train_subset, batch_size=128, shuffle=True, drop_last=True)
             acc_train, _ = evaluate_model(cluster_model, cluster_train_loader, device, loss_fn)
             acc_test, _ = evaluate_model(cluster_model, val_loader, device, loss_fn)
             print(f"  Cluster {c_id} Train Acc {acc_train:.2f}%, Test Acc {acc_test:.2f}%")
@@ -153,7 +181,7 @@ def train_model(model_name, num_classes, in_channels,
             global_model.load_state_dict(global_weights)
             
             all_train_subset = ConcatDataset(train_subsets)
-            all_train_loader = DataLoader(all_train_subset, batch_size=128, shuffle=False)
+            all_train_loader = DataLoader(all_train_subset, batch_size=128, shuffle=False, drop_last=True)
             g_train_acc, _ = evaluate_model(global_model, all_train_loader, device, loss_fn)
             g_test_acc, _ = evaluate_model(global_model, val_loader, device, loss_fn)
             print(f"Global Epoch {g_epoch+1}: Train Acc {g_train_acc:.2f}%, Test Acc {g_test_acc:.2f}%")

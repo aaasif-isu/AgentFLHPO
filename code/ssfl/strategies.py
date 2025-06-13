@@ -3,11 +3,16 @@
 import random
 import numpy as np
 from abc import ABC, abstractmethod
+from ssfl.trainer_utils import train_single_client
+from torch.utils.data import DataLoader
 
 class HPOStrategy(ABC):
     def __init__(self, initial_search_space: dict, client_states: list, **kwargs):
         self.initial_search_space = initial_search_space
         self.client_states = client_states
+        # NEW: Get HPO patience from the kwargs, which will be passed from the config
+        #self.hpo_patience = kwargs.get('hpo_patience', 3) # Default to 3
+
 
     @abstractmethod
     def get_hyperparameters(self, context: dict) -> tuple:
@@ -36,6 +41,7 @@ class AgentStrategy(HPOStrategy):
         super().__init__(initial_search_space, client_states, **kwargs)
         from agent.workflow import create_graph # Import the updated graph
         self.hpo_graph = create_graph()
+        #self.hpo_patience = kwargs.get('hpo_patience', 3)
 
     def get_hyperparameters(self, context: dict) -> tuple:
         client_id = context['client_id']

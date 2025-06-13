@@ -24,6 +24,8 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed(42)
     torch.backends.cudnn.deterministic = True
 
+
+
 def save_model(model, path):
     torch.save(model.state_dict(), path)
 
