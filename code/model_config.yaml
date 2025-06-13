@@ -16,7 +16,7 @@
 dataset_name: "mnist"  # or "mnist" "cifar10"
 model_name: "ResNet18"
 num_clients: 10
-global_epochs: 5
+global_epochs: 2
 local_epochs: 1
 batch_size: 128
 frac: 0.5

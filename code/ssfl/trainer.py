@@ -36,7 +36,9 @@ def train_model(model_name, num_classes, in_channels,
     strategy_name = hpo_config.get('method', 'fixed') # Default to 'fixed' if not specified
     
     # Initialize with 'hpo_report' dictionary instead of 'history' list
-    client_states = [{"search_space": initial_search_space.copy(), "hpo_report": {}} for i in range(num_clients)]
+    #client_states = [{"search_space": initial_search_space.copy(), "hpo_report": {}} for i in range(num_clients)]
+    # --- MODIFICATION 7: Add "last_analysis" key to the state dictionary ---
+    client_states = [{"search_space": initial_search_space.copy(), "hpo_report": {}, "last_analysis": None} for i in range(num_clients)]
 
     
     hpo_strategy = None
@@ -85,6 +87,9 @@ def train_model(model_name, num_classes, in_channels,
             print(f"Cluster {c_id} using arc_config={arc_cfg} with members {members}")
             local_client_w, local_server_w, local_sizes = [], [], []
 
+            # --- NEW: Initialize a list to store peer history for this cluster/epoch ---
+            cluster_peer_history = []
+
             for cid in members:
                 # --- 3. DELEGATE TO THE STRATEGY ---
                 context = {
@@ -92,6 +97,7 @@ def train_model(model_name, num_classes, in_channels,
                     "cluster_id": c_id,
                     "model_name": model_name,
                     "dataset_name": dataset_name,
+                    "peer_history": cluster_peer_history, # Pass the history of previous peers
                     "training_args": {
                         "model_name": model_name, "num_classes": num_classes, "arc_cfg": arc_cfg,
                         "global_model": global_model, "device": device, "in_channels": in_channels,
@@ -114,6 +120,16 @@ def train_model(model_name, num_classes, in_channels,
                 # Call the updated state method, now passing the global epoch
                 if final_state is not None and isinstance(hpo_strategy, AgentStrategy):
                     hpo_strategy.update_persistent_state(cid, context, final_state)
+
+                    # --- NEW: Create a summary of the completed run for the next peer ---
+                    if final_state.get('last_analysis'):
+                        key_insight = final_state.get('last_analysis', {}).get('decision_summary', 'Analysis failed.')
+                        peer_summary = {
+                            "client_id": cid,
+                            "hps_used": final_state.get('hps', {}),
+                            "result_and_decision": f"Achieved {final_state.get('results', {}).get('test_acc', [0.0])[-1]:.2f}% Acc. Analyzer Decision: '{key_insight}'"
+                        }
+                        cluster_peer_history.append(peer_summary)
             
 
             # --- Aggregation and Evaluation Logic (Unchanged) ---

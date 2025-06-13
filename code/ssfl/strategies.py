@@ -1,8 +1,9 @@
+# code/ssfl/strategies.py
+
 import random
 import numpy as np
 from abc import ABC, abstractmethod
 
-# This file contains the different HPO strategies you can use in your experiments.
 class HPOStrategy(ABC):
     def __init__(self, initial_search_space: dict, client_states: list, **kwargs):
         self.initial_search_space = initial_search_space
@@ -13,11 +14,9 @@ class HPOStrategy(ABC):
         raise NotImplementedError
 
     def update_persistent_state(self, client_id: int, context: dict, final_state: dict):
-        """
-        Updates the persistent state, now using the integer epoch number as the key.
-        """
+        # This base method is now only used by AgentStrategy.
+        # It needs to be updated to handle the new "last_analysis" field.
         if self.client_states and client_id < len(self.client_states):
-            # Get the current global epoch (as an integer) from the context
             global_epoch = context['training_args'].get('global_epoch', -1)
 
             new_report_entry = {
@@ -25,20 +24,23 @@ class HPOStrategy(ABC):
                 "final_test_accuracy": final_state.get('results', {}).get('test_acc', [None])[-1]
             }
             
-            # --- THIS IS THE FIX ---
-            # Use the integer epoch number directly as the key
             self.client_states[client_id]['hpo_report'][global_epoch] = new_report_entry
             self.client_states[client_id]['search_space'] = final_state.get('search_space', self.initial_search_space)
+            
+            # --- THE FINAL FIX: Save the reasoning for the next round ---
+            self.client_states[client_id]['last_analysis'] = final_state.get('last_analysis')
 
 
 class AgentStrategy(HPOStrategy):
     def __init__(self, initial_search_space: dict, client_states: list, **kwargs):
         super().__init__(initial_search_space, client_states, **kwargs)
-        from agent.workflow import create_graph
+        from agent.workflow import create_graph # Import the updated graph
         self.hpo_graph = create_graph()
 
     def get_hyperparameters(self, context: dict) -> tuple:
         client_id = context['client_id']
+        # The initial state passed to the graph now includes 'last_analysis'
+        # from self.client_states[client_id], which was saved in the previous round.
         initial_state = {**self.client_states[client_id], **context}
         
         final_state = self.hpo_graph.invoke(initial_state)
@@ -48,9 +50,10 @@ class AgentStrategy(HPOStrategy):
             final_state.get('client_weights'),
             final_state.get('server_weights'),
             final_state.get('data_size'),
-            final_state
+            final_state # Pass the entire final state to trainer.py
         )
 
+# ... (The other strategies like FixedStrategy, RandomSearchStrategy, etc., remain unchanged) ...
 
 class FixedStrategy(HPOStrategy):
     """
@@ -66,7 +69,8 @@ class FixedStrategy(HPOStrategy):
         from ssfl.trainer_utils import train_single_client
         print(f"--- Training Client {context['client_id']} with Fixed HPs: {self.fixed_hps} ---")
         w_c, w_s, sz, _ = train_single_client(**context['training_args'], hps=self.fixed_hps, cid=context['client_id'])
-        return self.fixed_hps, w_c, w_s, sz
+        # The 'final_state' is None for non-agent strategies, so no update will be called.
+        return self.fixed_hps, w_c, w_s, sz, None
 
 
 class RandomSearchStrategy(HPOStrategy):
@@ -91,9 +95,10 @@ class RandomSearchStrategy(HPOStrategy):
         random_hps = self._generate_random_hps()
         print(f"--- Training Client {context['client_id']} with Random HPs: {random_hps} ---")
         w_c, w_s, sz, results = train_single_client(**context['training_args'], hps=random_hps, cid=context['client_id'])
-        return random_hps, w_c, w_s, sz
+        return random_hps, w_c, w_s, sz, None
 
-
+# NOTE: SHA and BO strategies remain unchanged as they do not use the agent workflow.
+# I have omitted them here for brevity but you should keep them in your file.
 class SHA_Strategy(HPOStrategy):
     """
     A functional implementation of Successive Halving (SHA).
@@ -165,7 +170,7 @@ class SHA_Strategy(HPOStrategy):
             self.rung_evals = 0 # Reset for the new, smaller rung
             print(f"--- Advanced to SHA Rung {self.rung}. New population size: {len(self.population)} ---")
 
-        return hps_to_use, w_c, w_s, sz
+        return hps_to_use, w_c, w_s, sz, None
 
 
 class BO_Strategy(HPOStrategy):
@@ -180,6 +185,8 @@ class BO_Strategy(HPOStrategy):
             from skopt.space import Real, Categorical
         except ImportError:
             raise ImportError("To use BO_Strategy, please install scikit-optimize: `pip install scikit-optimize`")
+        
+        self.num_clients = kwargs.get('num_clients',1)
 
         # --- Setup for Bayesian Optimization ---
         # 1. Define the search space in the format the library expects
@@ -214,4 +221,4 @@ class BO_Strategy(HPOStrategy):
         score = -results['test_acc'][-1] 
         optimizer.tell(suggested_params_list, score)
         
-        return hps, w_c, w_s, sz
+        return hps, w_c, w_s, sz, None
