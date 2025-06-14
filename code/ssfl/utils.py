@@ -51,15 +51,6 @@ def create_model(model_name: str, num_classes: int, in_channels=3):
     else:
         raise ValueError(f"Unsupported model: {model_name}")
 
-def create_model_old(model_name: str, num_classes: int):
-    from torchvision import models
-    if model_name.lower() == 'resnet18':
-        model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
-        model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
-        return model
-    else:
-        raise ValueError(f"Unsupported model: {model_name}")
-
 
 class HAM10000Dataset(Dataset):
     def __init__(self, csv_file, image_dir, transform=None):
