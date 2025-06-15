@@ -63,7 +63,7 @@ def suggest_node(state: HPOState) -> HPOState:
     return state
 
 def prepare_loader_node(state: HPOState) -> HPOState:
-    print(f"\n>>> Graph Node: PREPARE_LOADER for Client {state['client_id']}")
+    print(f">>> Graph Node: PREPARE_LOADER for Client {state['client_id']}")
     cid = state['client_id']
     client_hps = state.get('hps', {}).get('client', {})
     batch_size = client_hps.get('batch_size', 32)
@@ -78,18 +78,18 @@ def prepare_loader_node(state: HPOState) -> HPOState:
         # This is an edge case that should not happen with your data check, but it's a critical safeguard.
         raise ValueError(f"FATAL: Client {cid} dataset has size {len(dataset)}, which is <= 1. Cannot train.")
 
-    print(f"  - Creating DataLoader for Client {cid} with batch_size={final_batch_size}, shuffle=True, drop_last={drop_last_flag}")
+    #print(f"  - Creating DataLoader for Client {cid} with batch_size={final_batch_size}, shuffle=True, drop_last={drop_last_flag}")
 
 
     
     dynamic_train_loader = DataLoader(state['train_subsets'][cid], batch_size=batch_size, shuffle=True, drop_last=True)
-    print(f"  - Created DataLoader for Client {cid} with batch_size={batch_size}")
+    #print(f"  - Created DataLoader for Client {cid} with batch_size={batch_size}")
     
     state['train_loader'] = dynamic_train_loader
     return state
 
 def train_node(state: HPOState) -> HPOState:
-    print(f"\n>>> Graph Node: TRAIN for Client {state['client_id']}")
+    print(f">>> Graph Node: TRAIN for Client {state['client_id']}")
     
     # --- THIS IS THE FIX ---
     # Create a new dictionary containing ALL arguments for the training function
@@ -113,7 +113,7 @@ def train_node(state: HPOState) -> HPOState:
     return state
 
 def analyze_node(state: HPOState) -> HPOState:
-    print(f"\n>>> Graph Node: ANALYZE for Client {state['client_id']}")
+    print(f">>> Graph Node: ANALYZE for Client {state['client_id']}")
     new_search_space, reasoning = analyzer_agent.analyze(
         client_id=state['client_id'],
         cluster_id=state['cluster_id'],

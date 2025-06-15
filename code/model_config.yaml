@@ -45,7 +45,7 @@
 # Model and Dataset Configuration
 model_name: ResNet18
 dataset_name: cifar10
-imbalance_ratio: 0.5
+imbalance_ratio: 0.1
 train_sample_fraction: 1
 test_sample_fraction: 1
 min_samples_per_client: 8
@@ -55,7 +55,7 @@ num_clusters: 3
 
 # Federated Learning Configuration
 num_clients: 100
-global_epochs: 20
+global_epochs: 50
 frac: 0.1  # Fraction of clients participating in each round
 
 # --- REMOVED ---
@@ -63,13 +63,14 @@ frac: 0.1  # Fraction of clients participating in each round
 
 # NEW: Training Control Parameters
 training_params:
-  patience: 5
+  patience: 15
   min_delta: 0.01
 
 # HPO Agent Configuration
 hpo_strategy:
   method: agent # Can be agent, random_search, sha, bo, fixed
   hpo_checkpoint_path: agent/client_hpo_states.yaml
+  history_window: 5 
   # Stop optimizing a client if its accuracy hasn't improved for this many rounds.
   # hpo_patience: 3
 

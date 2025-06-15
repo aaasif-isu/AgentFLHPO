@@ -30,6 +30,25 @@ class HPOStrategy(ABC):
             }
             
             self.client_states[client_id]['hpo_report'][global_epoch] = new_report_entry
+
+            # ========== EARLY TRIMMING LOGIC ==========
+            hpo_report = self.client_states[client_id]['hpo_report']
+            
+            # Keep only the most recent epochs within the window
+            if len(hpo_report) > self.history_window:
+                recent_epochs = sorted(hpo_report.keys())[-self.history_window:]
+                
+                # Special case: If this client just early stopped, always keep the stopping epoch
+                current_epoch = context['training_args'].get('global_epoch', -1)
+                if current_epoch not in recent_epochs:
+                    # Replace oldest with current (stopping) epoch
+                    recent_epochs = recent_epochs[1:] + [current_epoch]
+
+                self.client_states[client_id]['hpo_report'] = {
+                    epoch: hpo_report[epoch] for epoch in recent_epochs
+                }
+                print(f"  - Trimmed Client {client_id} history to {len(recent_epochs)} recent epochs")
+        
             self.client_states[client_id]['search_space'] = final_state.get('search_space', self.initial_search_space)
             
             # --- THE FINAL FIX: Save the reasoning for the next round ---
@@ -41,6 +60,7 @@ class AgentStrategy(HPOStrategy):
         super().__init__(initial_search_space, client_states, **kwargs)
         from agent.workflow import create_graph # Import the updated graph
         self.hpo_graph = create_graph()
+        self.history_window = kwargs.get('history_window', 5)
         #self.hpo_patience = kwargs.get('hpo_patience', 3)
 
     def get_hyperparameters(self, context: dict) -> tuple:

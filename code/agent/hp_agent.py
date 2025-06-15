@@ -48,10 +48,11 @@ class HPAgent:
         return validated_hps
 
 
+
     def suggest(self, client_id, cluster_id, model_name, dataset_name, hpo_report,
-                search_space, analysis_from_last_round: dict | None = None,
-                peer_history: list | None = None, arc_cfg: int = 0, total_layers: int = 0):
-        
+            search_space, analysis_from_last_round: dict | None = None,
+            peer_history: list | None = None, arc_cfg: int = 0, total_layers: int = 0):
+    
         prompt = get_hp_suggestion_prompt(
             client_id=client_id, cluster_id=cluster_id, model_name=model_name,
             dataset_name=dataset_name, hpo_report=hpo_report,
@@ -61,36 +62,64 @@ class HPAgent:
 
         response_json_str = call_llm(prompt)
         
+        # =============== ROBUST JSON PARSING ===============
         try:
-            response_data = json.loads(response_json_str)
+            # Clean the response string
+            if not response_json_str or not response_json_str.strip():
+                raise ValueError("Empty response from LLM")
+            
+            # Remove common problematic characters
+            cleaned_response = response_json_str.strip()
+            
+            # Try to extract JSON if it's wrapped in markdown code blocks
+            if "```json" in cleaned_response:
+                start = cleaned_response.find("```json") + 7
+                end = cleaned_response.find("```", start)
+                if end != -1:
+                    cleaned_response = cleaned_response[start:end].strip()
+            elif "```" in cleaned_response:
+                start = cleaned_response.find("```") + 3
+                end = cleaned_response.find("```", start)
+                if end != -1:
+                    cleaned_response = cleaned_response[start:end].strip()
+            
+            # Remove control characters that break JSON
+            import re
+            cleaned_response = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', cleaned_response)
+            
+            response_data = json.loads(cleaned_response)
             llm_reasoning = response_data.get("reasoning", "No reasoning provided.")
             suggested_hps = response_data.get("hps", {})
             
             if not isinstance(suggested_hps, dict) or not suggested_hps:
-                 raise json.JSONDecodeError("Response 'hps' key is not a valid, non-empty dictionary.", "", 0)
+                raise ValueError("Response 'hps' key is not a valid, non-empty dictionary.")
             
-            print(f"--- [HP Agent Verdict for Client {client_id}] ---")
-            print(f"  - Reasoning: {llm_reasoning}")
-            print(f"LLM Suggested HPs (raw): {json.dumps(suggested_hps, indent=2)}")
+            # print(f"--- [HP Agent Verdict for Client {client_id}] ---")
+            # print(f"  - Reasoning: {llm_reasoning}")
+            #print(f"LLM Suggested HPs (raw): {json.dumps(suggested_hps, indent=2)}")
 
-            # --- New Nested Validation Logic ---
+            # Existing validation logic (unchanged)
             final_hps = {
                 "client": self._validate_hps(suggested_hps, search_space, 'client'),
                 "server": self._validate_hps(suggested_hps, search_space, 'server'),
-                "mu": suggested_hps.get('mu', 0.0) # Mu is global
+                "mu": suggested_hps.get('mu', 0.0)
             }
+            
             # Clamp mu as well
             mu_config = search_space.get('mu', {})
             if mu_config:
                 final_hps['mu'] = max(mu_config.get('min', 0.0), min(mu_config.get('max', 1.0), final_hps['mu']))
 
-            print(f"Final suggested HPs (validated): {json.dumps(final_hps, indent=2)}")
-            print("---")
+            #print(f"Final suggested HPs (validated): {json.dumps(final_hps, indent=2)}")
+            #print("---")
             return final_hps
             
-        except (json.JSONDecodeError, KeyError) as e:
-            print(f"Error: Could not parse HPs from LLM response: {e}")
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            print(f"❌ Error: Could not parse HPs from LLM response: {e}")
+            print(f"   Raw response (first 200 chars): {repr(response_json_str[:200])}")
+            
             # Fallback to initial values for the full nested structure
+            print(f"   Using fallback hyperparameters for Client {client_id}")
             fallback_hps = {
                 "client": {k: v['initial'] for k, v in search_space.get('client_hps', {}).items()},
                 "server": {k: v['initial'] for k, v in search_space.get('server_hps', {}).items()},

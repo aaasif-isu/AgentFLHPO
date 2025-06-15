@@ -39,14 +39,13 @@ def _build_dynamic_search_space_description(search_space: dict) -> str:
 
     return "\n".join(lines)
 
-
 def get_hp_suggestion_prompt(
     client_id: int, cluster_id: int, model_name: str, dataset_name: str,
     hpo_report: dict, search_space: dict, analysis_from_last_round: dict | None = None,
     peer_history: list | None = None, arc_cfg: int = 0, total_layers: int = 0
 ) -> str:
 
-    # --- Re-introduced string formatting logic ---
+    # Build history string (existing logic)
     history_lines = []
     if hpo_report:
         for epoch, report in sorted(hpo_report.items()):
@@ -69,24 +68,52 @@ def get_hp_suggestion_prompt(
             peer_lines.append(f"- Client {peer_run['client_id']} used HPs ({hps_str}) --> {peer_run['result_and_decision']}")
         peer_history_str = "\n".join(peer_lines)
 
-    # --- Create a detailed example for the new, complex HP structure ---
+    # ============= NEW: EXTRACT EXACT CONSTRAINTS =============
+    client_constraints = []
+    server_constraints = []
+    
+    for param, config in search_space.get('client_hps', {}).items():
+        if config.get('type') == 'choice':
+            client_constraints.append(f"  - {param}: MUST be one of {config['values']}")
+        elif config.get('type') in ['float', 'int']:
+            client_constraints.append(f"  - {param}: MUST be between {config['min']} and {config['max']}")
+    
+    for param, config in search_space.get('server_hps', {}).items():
+        if config.get('type') == 'choice':
+            server_constraints.append(f"  - {param}: MUST be one of {config['values']}")
+        elif config.get('type') in ['float', 'int']:
+            server_constraints.append(f"  - {param}: MUST be between {config['min']} and {config['max']}")
+
+    client_constraints_str = "\n".join(client_constraints)
+    server_constraints_str = "\n".join(server_constraints)
+    
+    mu_config = search_space.get('mu', {})
+    mu_constraint = f"MUST be between {mu_config.get('min', 0.0)} and {mu_config.get('max', 1.0)}" if mu_config else "any float"
+
+    # Create example with ACTUAL values from search space
     example_hps_dict = {
         "reasoning": "A detailed, multi-part reason for all HP choices.",
         "hps": {
             "client": {
-                "learning_rate": 0.001, "weight_decay": 5e-05, "momentum": 0.9,
-                "optimizer": "AdamW", "scheduler": "CosineAnnealingLR",
-                "local_epochs": 2, "batch_size": 32, "dropout_rate": 0.2
+                "learning_rate": search_space.get('client_hps', {}).get('learning_rate', {}).get('initial', 0.001),
+                "weight_decay": search_space.get('client_hps', {}).get('weight_decay', {}).get('initial', 5e-05),
+                "momentum": search_space.get('client_hps', {}).get('momentum', {}).get('initial', 0.9),
+                "optimizer": search_space.get('client_hps', {}).get('optimizer', {}).get('initial', 'AdamW'),
+                "scheduler": search_space.get('client_hps', {}).get('scheduler', {}).get('initial', 'CosineAnnealingLR'),
+                "local_epochs": search_space.get('client_hps', {}).get('local_epochs', {}).get('initial', 1),
+                "batch_size": search_space.get('client_hps', {}).get('batch_size', {}).get('initial', 32),
+                "dropout_rate": search_space.get('client_hps', {}).get('dropout_rate', {}).get('initial', 0.1)
             },
             "server": {
-                "learning_rate": 0.005, "momentum": 0.9,
-                "optimizer": "SGD", "scheduler": "StepLR"
+                "learning_rate": search_space.get('server_hps', {}).get('learning_rate', {}).get('initial', 0.001),
+                "momentum": search_space.get('server_hps', {}).get('momentum', {}).get('initial', 0.9),
+                "optimizer": search_space.get('server_hps', {}).get('optimizer', {}).get('initial', 'AdamW'),
+                "scheduler": search_space.get('server_hps', {}).get('scheduler', {}).get('initial', 'None')
             },
-            "mu": 0.01
+            "mu": search_space.get('mu', {}).get('initial', 0.01)
         }
     }
     example_json_str = json.dumps(example_hps_dict, indent=4)
-    search_space_str = _build_dynamic_search_space_description(search_space)
 
     return f"""
 You are an expert ML engineer specializing in Split Federated Learning. Your goal is to suggest a complete set of hyperparameters for both the client and the server.
@@ -105,26 +132,32 @@ You are an expert ML engineer specializing in Split Federated Learning. Your goa
 - **Peer History (This Epoch):**
 {peer_history_str}
 - **Last Round's Analysis:** {analysis_str}
-- **Client HPs to select:** `learning_rate`, `weight_decay`, `momentum`, `optimizer`, `scheduler`, `local_epochs`, `batch_size`, `dropout_rate`.
-- **Your Task:** Based on all context, choose the best HPs for the client's local training.
 
 {'-'*40}
-**SERVER-SIDE CONTEXT & INSTRUCTIONS**
-- **Model Split:** The client runs the first {arc_cfg} of {total_layers} layers. The server runs the remaining {total_layers - arc_cfg} layers.
-- **Server Task:** A deeper server model (lower arc_cfg) is more complex and may benefit from a different `learning_rate` or `optimizer`.
-- **Server HPs to select:** `learning_rate`, `momentum`, `optimizer`, `scheduler`.
+**STRICT CONSTRAINTS - YOU MUST FOLLOW THESE EXACTLY:**
+
+**Client Parameters:**
+{client_constraints_str}
+
+**Server Parameters:**
+{server_constraints_str}
+
+**Global Parameter:**
+- mu: {mu_constraint}
 
 {'-'*40}
-**AVAILABLE SEARCH SPACE**
-{search_space_str}
+**CRITICAL RULES:**
+1. **DO NOT suggest values outside the allowed ranges/choices**
+2. **DO NOT be creative with batch sizes** - only use the exact values listed
+3. **DO NOT suggest optimizers not in the list**
+4. **STICK TO THE CONSTRAINTS** - they exist for a reason
 
 {'-'*40}
 **OUTPUT FORMAT & INSTRUCTIONS**
 - Return a single, valid JSON object with "reasoning" and "hps" keys.
-- **CRITICAL:** You must adhere strictly to the available `values` for choice parameters and the `min`/`max` for numerical parameters listed in the search space.
 - The "hps" object must contain "client", "server", and "mu" keys as shown in the example.
 
-**EXAMPLE OUTPUT:**
+**EXAMPLE OUTPUT (using actual constraint values):**
 {example_json_str}
 """
 
@@ -136,6 +169,10 @@ def get_analysis_prompt(
     
     results_str = f"Final Test Accuracy = {results.get('test_acc', [0.0])[-1]:.2f}%"
 
+    # Extract parameter names from search space to show LLM exactly what to use
+    client_params = list(search_space.get('client_hps', {}).keys())
+    server_params = list(search_space.get('server_hps', {}).keys())
+    
     return f"""
 You are an expert ML HPO analysis agent.
 
@@ -149,30 +186,39 @@ Return a JSON object with two keys: "reasoning" (a brief summary) and "actions" 
 - HPs Used: {json.dumps(current_hps)}
 - Result: {results_str}
 
-**ACTIONS SYNTAX:**
-The "actions" key must be a list of JSON objects. Each object has four keys:
-- "param": The base name of the hyperparameter (e.g., "learning_rate").
-- "key": The property to change.
-    - For numerical parameters (float, int), use "min" or "max".
-    - For choice parameters (like optimizer or batch_size), you can only use "values".
-- "value": The new value for that property.
-- "target": Must be either "client_hps" or "server_hps".
+**AVAILABLE PARAMETERS TO MODIFY:**
+- Client parameters: {client_params}
+- Server parameters: {server_params}
 
-**EXAMPLE OUTPUT:**
+**CRITICAL INSTRUCTIONS FOR ACTIONS:**
+
+1. **Parameter Names**: Use ONLY the exact names from the lists above
+   - For client parameters, use "target": "client_hps" 
+   - For server parameters, use "target": "server_hps"
+
+2. **For CHOICE parameters** (batch_size, optimizer, scheduler):
+   - Use "key": "values" 
+   - "value" must be a LIST: [16, 32] not 32
+
+3. **For NUMERICAL parameters** (learning_rate, weight_decay, momentum, dropout_rate):
+   - Use "key": "min" or "max"
+   - "value" must be a single number: 0.001 not [0.001]
+
+**VALID EXAMPLE:**
 {{
-    "reasoning": "The client is overfitting, so I will lower the max learning rate for the client and increase the server's momentum.",
+    "reasoning": "Low accuracy suggests overfitting. Reducing batch size options and lowering max learning rate.",
     "actions": [
         {{
-            "param": "learning_rate",
-            "key": "max",
-            "value": 0.001,
+            "param": "batch_size",
+            "key": "values", 
+            "value": [16, 32],
             "target": "client_hps"
         }},
         {{
-            "param": "momentum",
-            "key": "min",
-            "value": 0.9,
-            "target": "server_hps"
+            "param": "learning_rate",
+            "key": "max",
+            "value": 0.005,
+            "target": "client_hps"
         }}
     ]
 }}

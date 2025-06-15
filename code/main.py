@@ -54,18 +54,18 @@ def main():
     )
 
     # --- ADD THIS DEBUGGING BLOCK ---
-    print("\n" + "="*40)
-    print("--- Verifying Client Dataset Sizes ---")
-    all_ok = True
-    for i, subset in enumerate(train_subsets):
-        if len(subset) <= 1:
-            print(f"  - WARNING: Client {i} has only {len(subset)} sample(s). This WILL cause a BatchNorm error.")
-            all_ok = False
-        else:
-            print(f"  - Client {i} has {len(subset)} samples. (OK)")
-    if all_ok:
-        print("--- All client datasets are large enough. ---")
-    print("="*40 + "\n")
+    # print("\n" + "="*40)
+    # print("--- Verifying Client Dataset Sizes ---")
+    # all_ok = True
+    # for i, subset in enumerate(train_subsets):
+    #     if len(subset) <= 1:
+    #         print(f"  - WARNING: Client {i} has only {len(subset)} sample(s). This WILL cause a BatchNorm error.")
+    #         all_ok = False
+    #     else:
+    #         print(f"  - Client {i} has {len(subset)} samples. (OK)")
+    # if all_ok:
+    #     print("--- All client datasets are large enough. ---")
+    # print("="*40 + "\n")
     # --- END DEBUGGING BLOCK ---
 
     # --- DataLoader Creation (Corrected Logic) ---

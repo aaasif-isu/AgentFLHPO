@@ -51,7 +51,7 @@ class AnalyzerAgent:
                 continue
             
             # If all checks pass, apply the change
-            print(f"  - Applying action: Setting {target_space_key}.{param}.{key_to_change} = {value}")
+            #print(f"  - Applying action: Setting {target_space_key}.{param}.{key_to_change} = {value}")
             new_space[target_space_key][param][key_to_change] = value
                 
         return new_space
@@ -74,14 +74,14 @@ class AnalyzerAgent:
             reasoning = response_data.get("reasoning", "No reasoning provided by LLM.")
             actions = response_data.get("actions", [])
             
-            print(f"\n--- [Analyzer Reasoning for Client {client_id}] ---")
-            print(f"  - LLM Reasoning: {reasoning}")
+            # print(f"\n--- [Analyzer Reasoning for Client {client_id}] ---")
+            # print(f"  - LLM Reasoning: {reasoning}")
             
             new_search_space = self._apply_actions_to_search_space(search_space, actions)
             
-            print("--- [Proposed New Search Space] ---")
-            print(json.dumps(new_search_space, indent=2))
-            print("-" * 45)
+            # print("--- [Proposed New Search Space] ---")
+            # print(json.dumps(new_search_space, indent=2))
+            # print("-" * 45)
 
             final_reasoning_obj = {
                 "performance_summary": reasoning,

@@ -34,6 +34,7 @@ def train_model(model_name, num_classes, in_channels,
     
     # --- 2. HPO STRATEGY SELECTION ---
     hpo_config = config.get('hpo_strategy', {})
+    history_window = hpo_config.get('history_window', 5)
     strategy_name = hpo_config.get('method', 'fixed') # Default to 'fixed' if not specified
     
     # Initialize with 'hpo_report' dictionary instead of 'history' list
@@ -57,7 +58,8 @@ def train_model(model_name, num_classes, in_channels,
     strategy_args = {
         "initial_search_space": initial_search_space,
         "client_states": client_states,
-        "num_clients": num_clients
+        "num_clients": num_clients,
+        "history_window": history_window 
     }
 
     if strategy_name == 'agent':
@@ -97,7 +99,7 @@ def train_model(model_name, num_classes, in_channels,
             if not members:
                 continue
 
-            print(f"Cluster {c_id} using arc_config={arc_cfg} with members {members}")
+            print(f"\n***Cluster {c_id} using arc_config={arc_cfg} with members {members}***")
             local_client_w, local_server_w, local_sizes = [], [], []
 
             # --- NEW: Initialize a list to store peer history for this cluster/epoch ---
@@ -125,16 +127,16 @@ def train_model(model_name, num_classes, in_channels,
                 # The strategy object handles all HPO and training logic
                 hps, w_c, w_s, sz, final_state = hpo_strategy.get_hyperparameters(context)
 
-                # Create the client's DataLoader on-the-fly using the suggested batch_size
-                client_hps = hps.get('client', {})
-                batch_size = client_hps.get('batch_size', 32)
-                dynamic_train_loader = DataLoader(train_subsets[cid], batch_size=batch_size, shuffle=True)
+                # # Create the client's DataLoader on-the-fly using the suggested batch_size
+                # client_hps = hps.get('client', {})
+                # batch_size = client_hps.get('batch_size', 32)
+                # dynamic_train_loader = DataLoader(train_subsets[cid], batch_size=batch_size, shuffle=True)
                 
-                # 4. Add the new loader to the training arguments
-                context['training_args']['train_loader'] = dynamic_train_loader
+                # # 4. Add the new loader to the training arguments
+                # context['training_args']['train_loader'] = dynamic_train_loader
                 
                 # 5. Call the training function, which uses `local_epochs` from inside `hps`.
-                w_c, w_s, sz, results = train_single_client(**context['training_args'], hps=hps, cid=cid)
+                #w_c, w_s, sz, results = train_single_client(**context['training_args'], hps=hps, cid=cid)
                 
                 # Append results for aggregation
                 local_client_w.append(w_c)
