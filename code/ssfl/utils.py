@@ -9,6 +9,7 @@ import os
 from torchvision import datasets, transforms
 
 
+
 import pandas as pd
 from PIL import Image
 from torch.utils.data import Dataset, random_split
@@ -120,19 +121,25 @@ def load_dataset(dataset_name, image_size=None):
         in_channels = 3  # Always return 3 channels for MNIST to support ResNet18
 
     elif dataset_name == "femnist":
+        #from torchvision.datasets import FEMNIST
+
         transform = transforms.Compose([
             transforms.Resize((image_size, image_size)),
             transforms.ToTensor(),
-            transforms.Lambda(lambda x: x.repeat(3, 1, 1) if native_in_channels == 1 else x),  # Repeat for 3-channel models
-            #transforms.Lambda(lambda x: x.repeat(3, 1, 1) if in_channels == 3 else x),  # Use in_channels
-            #transforms.Lambda(lambda x: x.repeat(3, 1, 1) if model_name.lower() == "resnet18" else x),  # Conditional transform
-            #transforms.Lambda(lambda x: x.repeat(3, 1, 1) if in_channels == 3 else x),
+            # The model expects 3 channels, but FEMNIST is 1-channel. This repeats the channel to make it compatible.
+            transforms.Lambda(lambda x: x.repeat(3, 1, 1)),
+            # Use the standard normalization for MNIST-like datasets
             transforms.Normalize((0.1307,), (0.3081,))
         ])
-        train_dataset = FEMNISTDataset(data_path="./data/FEMNIST/train", transform=transform)
-        test_dataset = FEMNISTDataset(data_path="./data/FEMNIST/test", transform=transform)
+        train_dataset = datasets.EMNIST(root='./data', split='byclass', download=True, transform=transform)
+        test_dataset = datasets.EMNIST(root='./data', split='byclass', download=True, transform=transform)
+        
+
+
         num_classes = 62
-        in_channels = 3  # Always return 3 channels for FEMNIST to support ResNet18
+        # Your models are designed for 3-channel inputs, so we set this to 3.
+        in_channels = 3
+
 
     elif dataset_name == "ham10000":
         transform = transforms.Compose([

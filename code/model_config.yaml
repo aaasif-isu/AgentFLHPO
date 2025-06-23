@@ -44,26 +44,26 @@
 
 # Model and Dataset Configuration
 model_name: ResNet18
-dataset_name: cifar10
-imbalance_ratio: 0.1
-train_sample_fraction: 1
-test_sample_fraction: 1
+dataset_name: cifar10 #cifar10 #mnist #femnist
+imbalance_ratio: 0.5
+train_sample_fraction: 1.0
+test_sample_fraction: 1.0
 min_samples_per_client: 8
 num_clusters: 3
 # num_classes: 10
 # in_channels: 1
 
 # Federated Learning Configuration
-num_clients: 100
-global_epochs: 50
-frac: 0.1  # Fraction of clients participating in each round
+num_clients: 10
+global_epochs: 3
+frac: 0.5  # Fraction of clients participating in each round
 
 # --- REMOVED ---
 # local_epochs and batch_size are now optimized by the agent.
 
 # NEW: Training Control Parameters
 training_params:
-  patience: 15
+  patience: 10
   min_delta: 0.01
 
 # HPO Agent Configuration
