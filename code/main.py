@@ -9,6 +9,7 @@ import logging
 from ssfl.utils import (
     load_dataset,
     partition_data_non_iid_random,
+    partition_text_non_iid_dirichlet,
     subsample_dataset, # From your original main_2
     Tee              # From your original main_2
 )
@@ -49,9 +50,28 @@ def main():
     train_subset = subsample_dataset(train_dataset, config["train_sample_fraction"])
     test_subset = subsample_dataset(test_dataset, config["test_sample_fraction"])
 
-    train_subsets = partition_data_non_iid_random(
-        train_subset, config["num_clients"], config["imbalance_ratio"], config["min_samples_per_client"]
-    )
+    
+    if config["dataset_name"].lower() == 'shakespeare':
+        print("Using non-IID Dirichlet partitioning for Shakespeare dataset.")
+        # Use our new, correct function for text data
+        train_subsets = partition_text_non_iid_dirichlet(
+            dataset=train_subset,
+            num_clients=config["num_clients"],
+            imbalance_factor=config["imbalance_ratio"], # You can reuse this config
+            min_samples_per_client=config["min_samples_per_client"] 
+        )
+    else:
+        print("Using non-IID random-class partitioning for image dataset.")
+        # Keep the original function for your image classification datasets
+        train_subsets = partition_data_non_iid_random(
+                train_subset, config["num_clients"], config["imbalance_ratio"], config["min_samples_per_client"]
+            )
+
+
+
+
+
+    
 
     # --- ADD THIS DEBUGGING BLOCK ---
     # print("\n" + "="*40)

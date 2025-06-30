@@ -7,6 +7,9 @@ from collections import OrderedDict
 import torch.nn.functional as F 
 from torchvision.models import vgg16, VGG16_Weights
 
+from transformers import BertModel, BertTokenizer, BertConfig
+
+
 
 
 def sequential_slice_keep_names(module_list: nn.ModuleList,
@@ -215,6 +218,140 @@ class ResNetServer(nn.Module):
         x = self.avgpool(x).flatten(1)
         return self.fc(x)
 
+class BERTBase(nn.Module):
+    def __init__(self, num_classes):
+        super().__init__()
+        self.bert = BertModel.from_pretrained("bert-base-uncased")
+        self.classifier = nn.Linear(self.bert.config.hidden_size, num_classes)
+        self.fc = self.classifier  # alias
+
+    def forward(self, input_ids, attention_mask):
+        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        pooled_output = outputs.pooler_output
+        return self.classifier(pooled_output)
+
+class BERTClient(nn.Module):
+    def __init__(self, base_model, arc_config, device="cpu"):
+        super().__init__()
+        assert arc_config in [0, 6, 9, 12], "arc_config must be 0, 6, 9 or 12 for BERT"
+        self.embeddings = copy.deepcopy(base_model.bert.embeddings)
+        self.encoder_layers = nn.ModuleList(
+            [copy.deepcopy(layer) for layer in base_model.bert.encoder.layer[:arc_config]]
+        )
+        self.to(device)
+
+    def get_extended_attention_mask(self, attention_mask: torch.Tensor, input_shape: torch.Size) -> torch.Tensor:
+        """
+        Makes the 2D attention mask broadcastable to [batch_size, num_heads, seq_length, seq_length].
+        This is a standard Hugging Face utility function.
+        """
+        extended_attention_mask = attention_mask[:, None, None, :]
+        extended_attention_mask = extended_attention_mask.to(dtype=self.embeddings.word_embeddings.weight.dtype)
+        extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
+        return extended_attention_mask
+
+    def forward(self, input_ids, attention_mask):
+        # Create the correct 4D attention mask for the encoder
+        extended_attention_mask = self.get_extended_attention_mask(attention_mask, input_ids.shape)
+        
+        hidden_states = self.embeddings(input_ids)
+        for layer in self.encoder_layers:
+            hidden_states = layer(hidden_states, attention_mask=extended_attention_mask)[0]
+            
+        # The client only needs to return the final hidden states
+        return hidden_states
+
+class BERTServer(nn.Module):
+    def __init__(self, base_model, arc_config, device="cpu"):
+        super().__init__()
+        assert arc_config in [0, 6, 9, 12], "arc_config must be 0, 6, 9 or 12 for BERT"
+        self.encoder_layers = nn.ModuleList(
+            [copy.deepcopy(layer) for layer in base_model.bert.encoder.layer[arc_config:]]
+        )
+        self.pooler = copy.deepcopy(base_model.bert.pooler)
+        self.classifier = copy.deepcopy(base_model.classifier)
+        self.fc = self.classifier
+        self.to(device)
+
+    def forward(self, hidden_states, attention_mask):
+        # The server also needs to create the extended mask for its layers.
+        # It gets the original 2D mask from the trainer loop.
+        extended_attention_mask = (1.0 - attention_mask[:, None, None, :]) * -10000.0
+        extended_attention_mask = extended_attention_mask.to(dtype=next(self.parameters()).dtype)
+        
+        for layer in self.encoder_layers:
+            hidden_states = layer(hidden_states, attention_mask=extended_attention_mask)[0]
+            
+        pooled_output = self.pooler(hidden_states)
+        logits = self.classifier(pooled_output)
+        return logits
+
+
+class CharLSTM(nn.Module):
+    """A simple character-level LSTM model."""
+    def __init__(self, num_classes, embedding_dim=128, hidden_dim=256, n_layers=2):
+        super().__init__()
+        self.num_classes = num_classes
+        self.hidden_dim = hidden_dim
+        self.n_layers = n_layers
+
+        self.embedding = nn.Embedding(num_classes, embedding_dim)
+        self.lstm = nn.LSTM(embedding_dim, hidden_dim, n_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, num_classes)
+
+    # =================== START OF THE FIX ===================
+    # Update the forward method signature to accept keyword arguments
+    def forward(self, input_ids, attention_mask=None, hidden=None):
+        # We now use 'input_ids' as the input variable name.
+        # The attention_mask is accepted but ignored, as the LSTM doesn't use it.
+        # input_ids shape: [batch_size, seq_length]
+        
+        embedded = self.embedding(input_ids)
+        # embedded shape: [batch_size, seq_length, embedding_dim]
+        
+        lstm_out, hidden = self.lstm(embedded, hidden)
+        # lstm_out shape: [batch_size, seq_length, hidden_dim]
+
+        # This part of the logic was already correct
+        lstm_out = lstm_out.contiguous().view(-1, self.hidden_dim)
+        logits = self.fc(lstm_out)
+        
+        # We only need to return the logits for the loss function
+        # The hidden state is for stateful inference, which we aren't doing here
+        return logits
+
+# --- Splitfed versions ---
+
+class CharLSTMClient(nn.Module):
+    """Client part of the CharLSTM: embedding layer."""
+    def __init__(self, base_model, device="cpu"):
+        super().__init__()
+        self.embedding = copy.deepcopy(base_model.embedding)
+        self.to(device)
+
+    def forward(self, input_ids, attention_mask=None):
+        # We use 'input_ids' and can safely ignore the 'attention_mask'
+        # as the embedding layer doesn't need it.
+        return self.embedding(input_ids)
+
+class CharLSTMServer(nn.Module):
+    """Server part of the CharLSTM: LSTM layers and the final classifier."""
+    def __init__(self, base_model, device="cpu"):
+        super().__init__()
+        self.lstm = copy.deepcopy(base_model.lstm)
+        self.fc = copy.deepcopy(base_model.fc)
+        self.hidden_dim = base_model.hidden_dim
+        self.to(device)
+        
+    def forward(self, x, attention_mask=None):
+        # The LSTM part does not use the attention mask, so we can ignore it.
+        # x is the output from the client (embedded features)
+        lstm_out, _ = self.lstm(x)
+        lstm_out = lstm_out.contiguous().view(-1, self.hidden_dim)
+        logits = self.fc(lstm_out)
+        return logits
+
+
 def create_split_vgg(num_classes: int,
                      arc_config: int,
                      base_model: nn.Module | None,
@@ -313,6 +450,37 @@ def create_split_resnet18(num_classes: int,
 
     return client, server, full.cpu(), total_layers
 
+def create_split_bert(num_classes, arc_config, base_model=None, device="cpu"):
+    if base_model is None:
+        base_model = BERTBase(num_classes)
+
+    total_layers = 12
+    if arc_config not in [0, 6, 9, 12]:
+        raise ValueError("arc_config must be one of [0, 6, 9, 12] for BERT")
+
+    client = BERTClient(base_model, arc_config, device)
+    server = BERTServer(base_model, arc_config, device)
+    return client, server, base_model.cpu(), total_layers
+
+def create_split_charlstm(num_classes, arc_config, base_model=None, device="cpu"):
+    """
+    Builds and splits a CharLSTM model.
+    The split for LSTM is simple: client has embeddings, server has the rest.
+    The arc_config is unused here but kept for compatibility.
+    """
+    if base_model is None:
+        base_model = CharLSTM(num_classes).to(device)
+
+    client_model = CharLSTMClient(base_model, device)
+    server_model = CharLSTMServer(base_model, device)
+    
+    # For LSTM, we can consider the "total layers" to be the LSTM layers + classifier
+    total_layers = base_model.n_layers + 1 
+    
+    return client_model, server_model, base_model.cpu(), total_layers
+
+
+
 def create_split_model(model_name: str, num_classes: int, arc_config: int, base_model=None, device='cpu', in_channels=3):
     """
     Create split models for different architectures.
@@ -323,12 +491,21 @@ def create_split_model(model_name: str, num_classes: int, arc_config: int, base_
         return create_split_cnn(num_classes, arc_config, device, in_channels)
     elif model_name.lower() == "vgg16":
         return create_split_vgg(num_classes, arc_config, base_model, device)
+    elif model_name.lower() == "bert":
+        return create_split_bert(num_classes, arc_config, base_model, device)
+    elif model_name.lower() == 'charlstm':
+        return create_split_charlstm(num_classes, arc_config, base_model, device)
+
     else:
         raise NotImplementedError(f"Model {model_name} not supported.")
 
 def get_total_layers(model: nn.Module) -> int:
     if hasattr(model, 'blocks') and isinstance(model.blocks, (nn.Sequential, nn.ModuleList)):
         return len(model.blocks)
+    elif hasattr(model, 'bert') and hasattr(model.bert, 'encoder'):
+        return len(model.bert.encoder.layer)  # For BERT
+    elif hasattr(model, 'lstm') and isinstance(model.lstm, nn.LSTM):
+        return model.lstm.num_layers
     raise NotImplementedError("Unsupported model architecture.")
 
 
@@ -364,6 +541,12 @@ def create_global_model(model_name: str,
 
         full = VGGBase(tv, num_classes).to(device)     # VGGBase defined earlier
         return full
+
+    elif model_name.lower() == "bert":
+        return BERTBase(num_classes).to(device)
+    
+    elif model_name.lower() == 'charlstm':
+        return CharLSTM(num_classes).to(device)
 
     else:
         raise NotImplementedError(f"{model_name} not supported")

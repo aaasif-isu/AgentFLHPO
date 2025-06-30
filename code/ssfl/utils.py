@@ -15,6 +15,11 @@ from PIL import Image
 from torch.utils.data import Dataset, random_split
 
 from torch.utils.data import Subset, random_split 
+import json
+from datasets import load_dataset as hf_load_dataset  # Import the huggingface loader
+from transformers import BertTokenizer
+import requests
+
 
 
 
@@ -53,6 +58,7 @@ def create_model(model_name: str, num_classes: int, in_channels=3):
         raise ValueError(f"Unsupported model: {model_name}")
 
 
+
 class HAM10000Dataset(Dataset):
     def __init__(self, csv_file, image_dir, transform=None):
         self.data = pd.read_csv(csv_file)
@@ -71,10 +77,154 @@ class HAM10000Dataset(Dataset):
             image = self.transform(image)
         return image, label
 
+class LeafShakespeareDataset(Dataset):
+    """
+    A PyTorch Dataset for the Leaf-preprocessed Shakespeare dataset.
+    This dataset is designed for next-character prediction.
+    """
+    def __init__(self, json_path):
+        with open(json_path, 'r') as f:
+            data = json.load(f)
+
+        self.users = data['users']
+        self.user_data = data['user_data']
+        self.num_samples = data['num_samples']
+
+        # Consolidate all text to build a vocabulary
+        all_text = ""
+        for user in self.users:
+            all_text += "".join(self.user_data[user]['x'])
+            all_text += "".join(self.user_data[user]['y'])
+
+        self.vocab = sorted(list(set(all_text)))
+        self.char_to_int = {char: i for i, char in enumerate(self.vocab)}
+        self.int_to_char = {i: char for i, char in enumerate(self.vocab)}
+
+        # Flatten the data into a single list of (input_sequence, target_character)
+        self.all_samples = []
+        for user in self.users:
+            for i in range(len(self.user_data[user]['x'])):
+                self.all_samples.append({
+                    'x': self.user_data[user]['x'][i],
+                    'y': self.user_data[user]['y'][i]
+                })
+
+    def __len__(self):
+        return len(self.all_samples)
+
+    def __getitem__(self, idx):
+        sample = self.all_samples[idx]
+        input_seq = sample['x']
+        target_char = sample['y']
+
+        # Encode input and target characters
+        input_tensor = torch.tensor([self.char_to_int[char] for char in input_seq], dtype=torch.long)
+        target_tensor = torch.tensor(self.char_to_int[target_char], dtype=torch.long)
+
+        return input_tensor, target_tensor
 
 def load_dataset(dataset_name, image_size=None):
     dataset_name = dataset_name.lower()
 
+    if dataset_name == "shakespeare":
+        # raw_dataset = hf_load_dataset("tiny_shakespeare")['train']
+        # full_text = "".join(raw_dataset['text'])
+
+        print("--- Downloading the complete works of Shakespeare from Project Gutenberg... ---")
+        url = "https://www.gutenberg.org/ebooks/100.txt.utf-8"
+        response = requests.get(url)
+        response.raise_for_status()  # This will raise an error if the download fails
+        full_text = response.text
+        print(f"--- Download complete. Total characters: {len(full_text)} ---")
+
+
+        # 2. Create a true character-level vocabulary
+        chars = sorted(list(set(full_text)))
+        vocab_size = len(chars)
+        print(f"--- Shakespeare Dataset: Building a character vocabulary of size: {vocab_size} ---")
+        char_to_int = {ch: i for i, ch in enumerate(chars)}
+        int_to_char = {i: ch for i, ch in enumerate(chars)}
+
+        # vocab = sorted(list(set(full_text)))
+        # vocab_size = len(vocab)
+        # char_to_int = {ch: i for i, ch in enumerate(vocab)}
+        # int_to_char = {i: ch for i, ch in enumerate(vocab)}
+
+        # 2. Define a PyTorch Dataset for next-character prediction
+        class NextCharDataset_old(Dataset):
+            def __init__(self, text, tokenizer, max_length=80):
+                self.tokenizer = tokenizer
+                self.max_length = max_length
+                self.encoded_text = self.tokenizer.encode(
+                    text,
+                    add_special_tokens=False, # We handle chunks manually
+                    return_tensors="pt"
+                ).squeeze(0)
+
+                # Create the .targets attribute for compatibility
+                #self.targets = self.encoded_text[1:].tolist()
+                self.targets = []
+
+            def __len__(self):
+                # The number of possible sequences we can create
+                #return len(self.encoded_text) - self.max_length
+                return len(self.encoded_text) - self.max_length - 1
+
+            def __getitem__(self, idx):
+                # The input sequence is a chunk of text tokens
+                #chunk = self.encoded_text[idx : idx + self.max_length]
+                input_chunk = self.encoded_text[idx : idx + self.max_length]
+                # The label for loss is the very next token after the chunk
+                #label = self.encoded_text[idx + self.max_length]
+                target_chunk = self.encoded_text[idx + 1 : idx + self.max_length + 1]
+
+                # BERT models expect specific dictionary keys
+                return {
+                    "input_ids": input_chunk,
+                    "attention_mask": torch.ones_like(input_chunk), # No padding, so mask is all 1s
+                    "labels": target_chunk # Shape: [max_length]
+                }
+        class NextCharDataset(Dataset):
+            def __init__(self, text, max_length=80):
+                self.max_length = max_length
+                # Encode the text using our simple character map
+                self.encoded_text = [char_to_int[ch] for ch in text]
+
+            def __len__(self):
+                # The number of possible sequences we can create
+                return len(self.encoded_text) - self.max_length - 1
+
+            def __getitem__(self, idx):
+                # The input sequence is a chunk of text tokens
+                input_chunk = torch.tensor(self.encoded_text[idx : idx + self.max_length], dtype=torch.long)
+                
+                # The target sequence is the same chunk, shifted one to the right
+                target_chunk = torch.tensor(self.encoded_text[idx + 1 : idx + self.max_length + 1], dtype=torch.long)
+
+                # Return a dictionary compatible with our trainer
+                return {
+                    "input_ids": input_chunk,
+                    "attention_mask": torch.ones_like(input_chunk), # Still needed for signature compatibility
+                    "labels": target_chunk
+                }
+
+        # 3. Create tokenizer and datasets
+        #tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+        n = len(full_text)
+        train_text = full_text[:int(n * 0.9)]
+        test_text = full_text[int(n * 0.9):]
+
+        train_dataset = NextCharDataset(train_text)
+        test_dataset = NextCharDataset(test_text)
+
+        # train_dataset = NextCharDataset(train_text, tokenizer)
+        # test_dataset = NextCharDataset(test_text, tokenizer)
+
+        sequence_length = 80
+        in_channels = 1
+        
+        # The number of classes for shakespeare is now vocab_size
+        return train_dataset, test_dataset, vocab_size, sequence_length, in_channels
     # Set default image size
     if image_size is None:
         if dataset_name == "cifar10":
@@ -177,6 +327,142 @@ def subsample_dataset(dataset, sample_fraction):
     num_samples = int(len(dataset) * sample_fraction)
     indices = torch.randperm(len(dataset))[:num_samples]
     return Subset(dataset, indices)
+
+def partition_text_non_iid_dirichlet(dataset, num_clients, imbalance_factor, min_samples_per_client):
+    """
+    Partitions a dataset into non-IID subsets using a Dirichlet distribution,
+    while ensuring a minimum number of samples per client.
+
+    Args:
+        dataset: The full dataset to partition.
+        num_clients: The number of clients.
+        imbalance_factor (float): Controls the level of non-IID-ness.
+        min_samples_per_client (int): The minimum number of samples each client must have.
+    
+    Returns:
+        A list of Subsets, one for each client.
+    """
+    num_samples = len(dataset)
+    indices = np.arange(num_samples)
+    
+    # Ensure the minimum sample requirement is feasible
+    if num_clients * min_samples_per_client > num_samples:
+        raise ValueError("The total minimum number of samples required is greater than the dataset size.")
+
+    # 1. Initial distribution using Dirichlet
+    client_data_proportions = np.random.dirichlet(np.repeat(imbalance_factor, num_clients))
+    client_sample_counts = (client_data_proportions * num_samples).astype(int)
+
+    # =================== START OF THE NEW LOGIC ===================
+
+    # 2. Identify clients below the minimum and the "deficit" of samples
+    below_min_indices = np.where(client_sample_counts < min_samples_per_client)[0]
+    deficit = np.sum(min_samples_per_client - client_sample_counts[below_min_indices])
+    
+    # 3. Set the clients that were below the minimum to have the minimum
+    client_sample_counts[below_min_indices] = min_samples_per_client
+    
+    # 4. Find clients that are "donors" (have more than the minimum)
+    above_min_indices = np.where(client_sample_counts > min_samples_per_client)[0]
+    
+    # 5. Take back the deficit from the donor clients
+    # We take samples proportionally from the donors that have a surplus
+    surplus_proportions = client_sample_counts[above_min_indices] - min_samples_per_client
+    
+    if np.sum(surplus_proportions) < deficit:
+        # This is a rare edge case where donors don't have enough surplus
+        # In this case, we'll just take what we can and adjust
+        client_sample_counts[above_min_indices] = min_samples_per_client
+    else:
+        # Distribute the deficit proportionally among the donors
+        reduction_proportions = surplus_proportions / np.sum(surplus_proportions)
+        reduction_amounts = (reduction_proportions * deficit).astype(int)
+        client_sample_counts[above_min_indices] -= reduction_amounts
+
+    # =================== END OF THE NEW LOGIC =====================
+
+    # Final adjustment to ensure the total number of samples is exactly correct
+    # due to rounding, and add the remainder to the client with the most samples.
+    diff = np.sum(client_sample_counts) - num_samples
+    richest_client = np.argmax(client_sample_counts)
+    client_sample_counts[richest_client] -= diff
+
+    # Assert that the sum is correct
+    assert np.sum(client_sample_counts) == num_samples, "Final sample counts do not sum up to total samples"
+    assert np.all(client_sample_counts >= min_samples_per_client), "Some clients still have fewer than the minimum samples"
+
+    # The rest of the function remains the same
+    client_subsets = []
+    current_idx = 0
+    np.random.shuffle(indices)
+
+    print(f"Partitioning data with Dirichlet (factor={imbalance_factor}, min_samples={min_samples_per_client}): {num_samples} samples for {num_clients} clients.")
+
+    for i in range(num_clients):
+        num_client_samples = client_sample_counts[i]
+        client_indices = indices[current_idx : current_idx + num_client_samples]
+        client_subsets.append(Subset(dataset, indices=client_indices))
+        current_idx += num_client_samples
+        #print(f"  - Client {i}: {len(client_indices)} samples")
+        
+    return client_subsets
+
+
+def partition_text_non_iid_dirichlet_old(dataset, num_clients, imbalance_factor):
+    """
+    Partitions a dataset into non-IID subsets using a Dirichlet distribution.
+    This is a standard method for creating realistic non-IID data distributions
+    for text and other types of data in Federated Learning.
+
+    Args:
+        dataset: The full dataset to partition.
+        num_clients: The number of clients.
+        imbalance_factor (float): Controls the level of non-IID-ness. A smaller
+                                  value creates more imbalanced (more non-IID) data.
+                                  A large value approaches an IID distribution.
+
+    Returns:
+        A list of Subsets, one for each client.
+    """
+    num_samples = len(dataset)
+    indices = np.arange(num_samples)
+
+    # Ensure the minimum sample requirement is feasible
+    if num_clients * min_samples_per_client > num_samples:
+        raise ValueError("The total minimum number of samples required is greater than the dataset size.")
+
+    
+    # Create a matrix to hold the number of samples for each client
+    client_data_proportions = np.random.dirichlet(np.repeat(imbalance_factor, num_clients))
+    #client_sample_counts = (client_data_proportions * num_samples).astype(int)
+
+    
+    # Ensure every client gets at least one sample
+    client_data_proportions = client_data_proportions / np.sum(client_data_proportions)
+    
+    client_sample_counts = (client_data_proportions * num_samples).astype(int)
+    
+    # Due to rounding, we might have a slight mismatch, so adjust the last client
+    diff = np.sum(client_sample_counts) - num_samples
+    client_sample_counts[-1] -= diff
+
+    # Assert that the sum is correct
+    assert np.sum(client_sample_counts) == num_samples, "Sample counts do not sum up to total samples"
+
+    client_subsets = []
+    current_idx = 0
+    np.random.shuffle(indices) # Shuffle indices to ensure random distribution of sequences
+
+    print(f"Partitioning data with Dirichlet (factor={imbalance_factor}): {num_samples} samples for {num_clients} clients.")
+
+    for i in range(num_clients):
+        num_client_samples = client_sample_counts[i]
+        client_indices = indices[current_idx : current_idx + num_client_samples]
+        client_subsets.append(Subset(dataset, client_indices))
+        current_idx += num_client_samples
+        print(f"  - Client {i}: {len(client_indices)} samples")
+        
+    return client_subsets
 
 def partition_data_non_iid_random(subset, num_clients, imbalance_factor, min_samples_per_client):
     full_dataset = subset.dataset

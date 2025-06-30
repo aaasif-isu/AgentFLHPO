@@ -75,7 +75,7 @@ client_hps:
     initial: 0.9
   optimizer:
     type: choice
-    values: ['AdamW', 'SGD']
+    values: ['AdamW', 'SGD', 'Adam']
     initial: 'AdamW'
   scheduler:
     type: choice
@@ -88,7 +88,7 @@ client_hps:
     initial: 2
   batch_size:
     type: choice
-    values: [16, 32, 64, 128, 256]
+    values: [8, 16, 32, 64, 128]
     initial: 64
   dropout_rate:
     type: float
@@ -109,7 +109,7 @@ server_hps:
     initial: 0.9
   optimizer:
     type: choice
-    values: ['AdamW', 'SGD']
+    values: ['AdamW', 'SGD', 'Adam']
     initial: 'AdamW'
   scheduler:
     type: choice

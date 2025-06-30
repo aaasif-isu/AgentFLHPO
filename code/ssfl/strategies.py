@@ -5,6 +5,7 @@ import numpy as np
 from abc import ABC, abstractmethod
 from ssfl.trainer_utils import train_single_client
 from torch.utils.data import DataLoader
+import time
 
 class HPOStrategy(ABC):
     def __init__(self, initial_search_space: dict, client_states: list, **kwargs):
@@ -68,8 +69,16 @@ class AgentStrategy(HPOStrategy):
         # The initial state passed to the graph now includes 'last_analysis'
         # from self.client_states[client_id], which was saved in the previous round.
         initial_state = {**self.client_states[client_id], **context}
+
+        print("\n>>> Invoking HPO Agent graph...")
+        start_time = time.time()
         
         final_state = self.hpo_graph.invoke(initial_state)
+
+        end_time = time.time()
+        total_latency = end_time - start_time
+        print(f">>> HPO Agent graph finished. Total Interaction Latency: {total_latency:.2f} seconds.")
+
         
         return (
             final_state.get('hps'),

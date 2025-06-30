@@ -115,6 +115,26 @@ def get_hp_suggestion_prompt(
     }
     example_json_str = json.dumps(example_hps_dict, indent=4)
 
+    # 1. Create a dynamic, descriptive string for the task.
+    task_description = f"Model: {model_name} on {dataset_name}"
+    guidance_block = ""
+    if model_name.lower() in ['charlstm', 'bert']:
+        task_description += " (a **character-level text prediction** task)."
+        guidance_block = """
+            **GUIDANCE FOR TEXT MODELS (CHARLSTM/BERT):**
+            - **Key Hyperparameters:** For LSTMs and Transformers, `dropout_rate` is critical to prevent overfitting. `AdamW` is often the best optimizer.
+            - **Overfitting:** If training accuracy is high but test accuracy is low, you should suggest a HIGHER `dropout_rate`, a LOWER `learning_rate`, or FEWER `local_epochs`.
+            - **Underfitting:** If both training and test accuracies are low, the model is not learning. You should suggest a HIGHER `learning_rate` or MORE `local_epochs`.
+            """
+    else:
+        task_description += " (an **image classification** task)."
+        guidance_block = """
+            **GUIDANCE FOR IMAGE MODELS (CNN/ResNet):**
+            - **Key Hyperparameters:** `learning_rate` and `optimizer` choice are often most impactful. `weight_decay` can help with regularization.
+            - **Overfitting:** If training accuracy is high but test accuracy is low, suggest a HIGHER `weight_decay` or a LOWER `learning_rate`.
+            - **Underfitting:** If both accuracies are low, suggest a HIGHER `learning_rate`.
+            """
+
     return f"""
 You are an expert ML engineer specializing in Split Federated Learning. Your goal is to suggest a complete set of hyperparameters for both the client and the server.
 
@@ -122,7 +142,11 @@ You are an expert ML engineer specializing in Split Federated Learning. Your goa
 **OVERALL CONTEXT**
 - **Client ID:** {client_id}
 - **Model:** {model_name} on {dataset_name}
+- **Task:** {task_description}
 - **Federated Scheme:** SplitFed with FedProx regularization (controlled by `mu`).
+
+{'-'*40}
+{guidance_block} 
 
 {'-'*40}
 **CLIENT-SIDE CONTEXT & INSTRUCTIONS**
@@ -161,7 +185,103 @@ You are an expert ML engineer specializing in Split Federated Learning. Your goa
 {example_json_str}
 """
 
+
+
 def get_analysis_prompt(
+    client_id: int, cluster_id: int, model_name: str, dataset_name: str,
+    results: dict, current_hps: dict, search_space: dict,
+    global_epoch: int, local_epochs: int
+) -> str:
+    
+    results_str = f"Final Test Accuracy = {results.get('test_acc', [0.0])[-1]:.2f}%"
+
+    # =================== START OF THE FULLY UPDATED LOGIC ===================
+
+    # 1. Dynamically identify which parameters are choice vs numerical from the search space.
+    client_params_config = search_space.get('client_hps', {})
+    server_params_config = search_space.get('server_hps', {})
+    
+    client_choice_params = [k for k, v in client_params_config.items() if v.get('type') == 'choice']
+    client_numerical_params = [k for k, v in client_params_config.items() if v.get('type') in ['int', 'float']]
+    
+    server_choice_params = [k for k, v in server_params_config.items() if v.get('type') == 'choice']
+    server_numerical_params = [k for k, v in server_params_config.items() if v.get('type') in ['int', 'float']]
+
+    # 2. Prepare the task description and guidance block (your existing logic).
+    task_description = f"Model: {model_name} on {dataset_name}"
+    guidance_block = ""
+    if model_name.lower() in ['charlstm', 'bert']:
+        task_description += " (a **character-level text prediction** task)."
+        guidance_block = """
+**ANALYSIS GUIDANCE FOR TEXT MODELS:**
+- If the model is overfitting (high train acc, low test acc), consider actions that restrict the search space for `learning_rate` (e.g., lower the 'max') or `dropout_rate` (e.g., increase the 'max').
+- For numerical parameters like `local_epochs`, you must modify its 'min' or 'max', not 'values'.
+"""
+    else:
+        task_description += " (an **image classification** task)."
+        guidance_block = """
+**ANALYSIS GUIDANCE FOR IMAGE MODELS:**
+- If the model is overfitting (high train acc, low test acc), consider actions that lower the `learning_rate` search space or increase the `weight_decay` search space.
+"""
+    
+    # 3. Construct the final, more explicit prompt.
+    return f"""
+You are an expert ML HPO analysis agent.
+
+**TASK:**
+Analyze the client's performance and provide a list of actions to refine the hyperparameter search space.
+Return a JSON object with two keys: "reasoning" (a brief summary) and "actions" (a list of modification commands).
+
+**CONTEXT:**
+- Client: {client_id} (Epoch: {global_epoch + 1}, Capacity: {_get_cluster_capacity_string(cluster_id)})
+- Task: {task_description}
+- HPs Used: {json.dumps(current_hps)}
+- Result: {results_str}
+
+{guidance_block}
+
+**CRITICAL INSTRUCTIONS FOR ACTIONS:**
+
+1.  **You MUST use the correct modification key for each parameter based on its type.**
+    -   **For CHOICE parameters (use "key": "values"):**
+        -   Client: `{client_choice_params}`
+        -   Server: `{server_choice_params}`
+    -   **For NUMERICAL parameters (use "key": "min" or "max"):**
+        -   Client: `{client_numerical_params}`
+        -   Server: `{server_numerical_params}`
+
+2.  **Parameter Names**: Use ONLY the exact names from the lists above.
+    -   For client parameters, set "target": "client_hps".
+    -   For server parameters, set "target": "server_hps".
+
+3.  **Value Formatting**: The "value" field format MUST match the key.
+    -   If "key" is "values", then "value" MUST be a LIST (e.g., `[16, 32]`).
+    -   If "key" is "min" or "max", then "value" MUST be a single NUMBER (e.g., `0.005`).
+
+**VALID EXAMPLE:**
+{{
+    "reasoning": "Low accuracy suggests overfitting. Reducing batch size options and lowering max learning rate.",
+    "actions": [
+        {{
+            "param": "batch_size",
+            "key": "values",
+            "value": [8, 16],
+            "target": "client_hps"
+        }},
+        {{
+            "param": "learning_rate",
+            "key": "max",
+            "value": 0.001,
+            "target": "client_hps"
+        }}
+    ]
+}}
+
+**YOUR JSON OUTPUT:**
+"""
+
+
+def get_analysis_prompt_old(
     client_id: int, cluster_id: int, model_name: str, dataset_name: str,
     results: dict, current_hps: dict, search_space: dict,
     global_epoch: int, local_epochs: int
@@ -172,6 +292,21 @@ def get_analysis_prompt(
     # Extract parameter names from search space to show LLM exactly what to use
     client_params = list(search_space.get('client_hps', {}).keys())
     server_params = list(search_space.get('server_hps', {}).keys())
+
+    task_description = f"Model: {model_name} on {dataset_name}"
+    guidance_block = ""
+    if model_name.lower() in ['charlstm', 'bert']:
+        task_description += " (a **character-level text prediction** task)."
+        guidance_block = """
+            **ANALYSIS GUIDANCE FOR TEXT MODELS:**
+            - If the model is overfitting (high train acc, low test acc), consider actions that restrict the search space for `learning_rate` (e.g., lower the 'max') and `local_epochs` (e.g., change 'values' to a smaller set like [1]), or expand the search space for `dropout_rate` (e.g., increase the 'max').
+            """
+    else:
+        task_description += " (an **image classification** task)."
+        guidance_block = """
+            **ANALYSIS GUIDANCE FOR IMAGE MODELS:**
+            - If the model is overfitting (high train acc, low test acc), consider actions that lower the `learning_rate` search space or increase the `weight_decay` search space.
+            """
     
     return f"""
 You are an expert ML HPO analysis agent.
@@ -182,9 +317,12 @@ Return a JSON object with two keys: "reasoning" (a brief summary) and "actions" 
 
 **CONTEXT:**
 - Client: {client_id} (Epoch: {global_epoch + 1}, Capacity: {_get_cluster_capacity_string(cluster_id)})
-- Task: {model_name} on {dataset_name}
+- Task: {task_description}
 - HPs Used: {json.dumps(current_hps)}
 - Result: {results_str}
+
+{guidance_block}
+
 
 **AVAILABLE PARAMETERS TO MODIFY:**
 - Client parameters: {client_params}

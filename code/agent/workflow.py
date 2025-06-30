@@ -13,6 +13,8 @@ from .analyzer_agent import AnalyzerAgent
 # Correctly import from the ssfl package structure
 from ssfl.trainer_utils import train_single_client
 
+import time
+
 # Define the complete and correct state for the graph
 class HPOState(TypedDict):
     # Context passed from trainer.py
@@ -47,6 +49,8 @@ analyzer_agent = AnalyzerAgent()
 
 def suggest_node(state: HPOState) -> HPOState:
     print(f"\n>>> Graph Node: SUGGEST for Client {state['client_id']}")
+    start_time = time.time()
+
     hps = hp_agent.suggest(
         client_id=state['client_id'],
         cluster_id=state['cluster_id'],
@@ -59,6 +63,11 @@ def suggest_node(state: HPOState) -> HPOState:
         arc_cfg=state.get('arc_cfg'),
         total_layers=state.get('total_layers')
     )
+
+    end_time = time.time()
+    latency = end_time - start_time
+    print(f"  ... LLM response received.HP Suggestion Latency: {latency:.2f} seconds.")
+
     state['hps'] = hps
     return state
 
@@ -114,6 +123,8 @@ def train_node(state: HPOState) -> HPOState:
 
 def analyze_node(state: HPOState) -> HPOState:
     print(f">>> Graph Node: ANALYZE for Client {state['client_id']}")
+    start_time = time.time()
+
     new_search_space, reasoning = analyzer_agent.analyze(
         client_id=state['client_id'],
         cluster_id=state['cluster_id'],
@@ -125,6 +136,10 @@ def analyze_node(state: HPOState) -> HPOState:
         global_epoch=state['training_args']['global_epoch'],
         local_epochs=state['hps'].get('client',{}).get('local_epochs', 1)
     )
+    end_time = time.time()
+    latency = end_time - start_time
+    print(f"  ... LLM response received. Analysis Latency: {latency:.2f} seconds.")
+
     state['search_space'] = new_search_space
     state['last_analysis'] = reasoning
     return state
