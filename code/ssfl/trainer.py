@@ -23,7 +23,7 @@ def train_model(model_name, num_classes, in_channels,
                 train_subsets, val_loader,
                 device, global_epochs,
                 num_clients, imbalance_ratio, dataset_name, frac,
-                config): # Pass the whole config dictionary
+                config, client_states): # Pass the whole config dictionary
 
     loss_fn = torch.nn.CrossEntropyLoss().to(device)
     global_model = create_global_model(model_name, num_classes, in_channels, device)
@@ -42,7 +42,8 @@ def train_model(model_name, num_classes, in_channels,
     fl_mode = config.get('fl_mode', 'splitfed') # Default to 'splitfed'
     print(f"--- Using FL Mode: {fl_mode.upper()} ---")
 
-    client_states = [{"search_space": initial_search_space.copy(), "hpo_report": {}, "last_analysis": None} for i in range(num_clients)]
+    # Commented out for the decoupling CPU GPU task 
+    #client_states = [{"search_space": initial_search_space.copy(), "hpo_report": {}, "last_analysis": None} for i in range(num_clients)]
 
     hpo_strategy = None
 

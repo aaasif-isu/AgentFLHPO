@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from ssfl.trainer_utils import train_single_client
 from torch.utils.data import DataLoader
 import time
+from agent.shared_state import results_queue
+from agent.hp_agent import HPAgent
 
 class HPOStrategy(ABC):
     def __init__(self, initial_search_space: dict, client_states: list, **kwargs):
@@ -55,8 +57,171 @@ class HPOStrategy(ABC):
             # --- THE FINAL FIX: Save the reasoning for the next round ---
             self.client_states[client_id]['last_analysis'] = final_state.get('last_analysis')
 
-
 class AgentStrategy(HPOStrategy):
+    def __init__(self, initial_search_space: dict, client_states: list, **kwargs):
+        # Init can remain the same, without the graph
+        super().__init__(initial_search_space, client_states, **kwargs)
+        self.history_window = kwargs.get('history_window', 5)
+        # 2. CREATE AN AGENT INSTANCE FOR INITIAL SUGGESTIONS
+        self.hp_agent = HPAgent()
+
+    def _get_reasoned_initial_hps(self, context: dict) -> dict:
+        """
+        Calls the HPAgent directly to get a reasoned set of HPs for the first run,
+        mimicking the intelligence of your original framework.
+        """
+        print(f"  --> Client {context['client_id']}: Getting reasoned initial HPs from LLM (first run)...")
+        # This call has no performance history, but the agent can still reason
+        # based on client characteristics and the search space.
+        hps = self.hp_agent.suggest(
+            client_id=context['client_id'],
+            cluster_id=context['cluster_id'],
+            model_name=context['model_name'],
+            dataset_name=context['dataset_name'],
+            hpo_report={}, # No history yet
+            search_space=self.client_states[context['client_id']]['search_space'],
+            analysis_from_last_round=None, # No analysis yet
+            peer_history=context.get('peer_history')
+        )
+        return hps
+
+    def _get_initial_hps(self, search_space: dict) -> dict:
+        """
+        Recursively selects simple, concrete default HPs from the initial search space.
+        This is a robust method to get a valid "order" from the "menu".
+        """
+        hps = {}
+        for key, value in search_space.items():
+            if isinstance(value, dict):
+                # If the value is a dictionary defining a parameter (e.g., {'min':...}),
+                # extract a single default value.
+                if 'default' in value:
+                    hps[key] = value['default']
+                elif 'min' in value:
+                    hps[key] = value['min']  # Use the minimum as a safe default
+                else:
+                    # Otherwise, it's a nested group of HPs (like 'client' or 'server'). Recurse.
+                    hps[key] = self._get_initial_hps(value)
+            elif isinstance(value, list):
+                # If it's a list of choices, take the first one.
+                hps[key] = value[0]
+            else:
+                # It's already a concrete value.
+                hps[key] = value
+        return hps
+    
+    def get_hyperparameters(self, context: dict) -> tuple:
+        client_id = context['client_id']
+        current_state = self.client_states[client_id]
+
+        # --- THIS IS THE FINAL, CORRECT LOGIC ---
+        # On subsequent runs, it uses the HPs from the background worker.
+        if current_state.get('concrete_hps'):
+            hps = current_state['concrete_hps']
+        # On the very first run, it gets its own intelligent suggestion.
+        else:
+            hps = self._get_reasoned_initial_hps(context)
+
+
+        # The rest of the function proceeds with a valid set of HPs
+        client_hps = hps.get('client', {})
+        batch_size = client_hps.get('batch_size', 32)
+        dataset = context['train_subsets'][client_id]
+
+        if len(dataset) <= 1:
+            print(f"  - WARNING: Client {client_id} dataset is too small. Skipping.")
+            return hps, None, None, 0, {"hps": hps, "results": {"error": "Dataset too small"}}
+
+        train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+
+        print(f"[GPU Worker]: Training client {client_id}...")
+        training_args_with_loader = {**context['training_args'], 'train_loader': train_loader}
+
+        w_c, w_s, sz, results = train_single_client(
+            hps=hps,
+            cid=client_id,
+            **training_args_with_loader
+        )
+
+        # Offload the results to the background worker for the *next* round's suggestion
+        results_for_analyzer = {
+            "client_id": client_id, "results": results, "current_hps": hps,
+            "cluster_id": context['cluster_id'], "model_name": context['model_name'],
+            "dataset_name": context['dataset_name'], "global_epoch": context['training_args']['global_epoch'],
+            "peer_history": context.get("peer_history")
+        }
+        results_queue.put((client_id, results_for_analyzer))
+
+        final_state = {
+            "hps": hps, "results": results, "client_weights": w_c,
+            "server_weights": w_s, "data_size": sz,
+            "last_analysis": current_state.get('last_analysis', {})
+        }
+
+        return (
+            final_state.get('hps'), final_state.get('client_weights'),
+            final_state.get('server_weights'), final_state.get('data_size'),
+            final_state
+        )
+
+    def get_hyperparameters_old(self, context: dict) -> tuple:
+        client_id = context['client_id']
+        current_state = self.client_states[client_id]
+
+        # --- THIS LOGIC IS NOW CORRECT ---
+        # It uses the robust helper function for the first run.
+        if current_state.get('concrete_hps'):
+            hps = current_state['concrete_hps']
+        else:
+            print(f"  --> Client {client_id}: Using initial default HPs (first run).")
+            hps = self._get_initial_hps(current_state['search_space'])
+
+        # --- The rest of the function remains the same ---
+        client_hps = hps.get('client', {})
+        batch_size = client_hps.get('batch_size', 32)
+        dataset = context['train_subsets'][client_id]
+
+        if len(dataset) <= 1:
+            print(f"  - WARNING: Client {client_id} has only {len(dataset)} sample(s). Skipping.")
+            return hps, None, None, 0, {"hps": hps, "results": {"error": "Dataset too small"}}
+
+        train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+
+        print(f"🏋️  [Trainer GPU]: Training client {client_id}...")
+        training_args_with_loader = {**context['training_args'], 'train_loader': train_loader}
+
+        w_c, w_s, sz, results = train_single_client(
+            hps=hps,
+            cid=client_id,
+            **training_args_with_loader
+        )
+
+        results_for_analyzer = {
+            "client_id": client_id,
+            "results": results,
+            "current_hps": hps, # <-- THIS IS THE ONLY CHANGE. Renamed from 'hps_used'.
+            "cluster_id": context['cluster_id'],
+            "model_name": context['model_name'],
+            "dataset_name": context['dataset_name'],
+            "global_epoch": context['training_args']['global_epoch'],
+            "peer_history": context.get("peer_history")
+        }
+        results_queue.put((client_id, results_for_analyzer))
+
+        final_state = {
+            "hps": hps, "results": results, "client_weights": w_c,
+            "server_weights": w_s, "data_size": sz,
+            "last_analysis": current_state.get('last_analysis', {})
+        }
+
+        return (
+            final_state.get('hps'), final_state.get('client_weights'),
+            final_state.get('server_weights'), final_state.get('data_size'),
+            final_state
+        )
+
+
+class AgentStrategy_old(HPOStrategy):
     def __init__(self, initial_search_space: dict, client_states: list, **kwargs):
         super().__init__(initial_search_space, client_states, **kwargs)
         from agent.workflow import create_graph # Import the updated graph
